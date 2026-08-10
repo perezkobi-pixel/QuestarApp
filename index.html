@@ -562,6 +562,45 @@ function normalizeDbUrl(url){
   return String(url||'').trim().replace(/\/+$/,'');
 }
 
+/* ---------- local backup (per device, not synced to other devices) ---------- */
+const LOCAL_BACKUP_KEY = 'questar_local_backup';
+function saveLocalBackup(){
+  if(!state || !syncBucket) return;
+  try{
+    localStorage.setItem(LOCAL_BACKUP_KEY, JSON.stringify({ db: syncBucket, ts: Date.now(), state }));
+  }catch(e){ /* storage full or unavailable - ignore, not critical */ }
+}
+function getLocalBackup(){
+  try{
+    const raw = localStorage.getItem(LOCAL_BACKUP_KEY);
+    if(!raw) return null;
+    const parsed = JSON.parse(raw);
+    if(!parsed || !parsed.state || !parsed.ts) return null;
+    return parsed;
+  }catch(e){ return null; }
+}
+function fmtBackupTime(ts){
+  try{
+    const d = new Date(ts);
+    return d.toLocaleDateString('he-IL') + ' בשעה ' + d.toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'});
+  }catch(e){ return ''; }
+}
+async function restoreFromLocalBackup(){
+  const backup = getLocalBackup();
+  if(!backup){ showToast('אין גיבוי מקומי שמור במכשיר הזה'); return; }
+  if(!syncBucket){ showToast('אין חיבור פעיל למסד נתונים'); return; }
+  const ok = confirm(
+    'לשחזר את הנתונים מהגיבוי המקומי ששמור במכשיר הזה?\n\n' +
+    'הגיבוי מתאריך: ' + fmtBackupTime(backup.ts) + '\n\n' +
+    'שימו לב: הפעולה תדרוס את הנתונים הנוכחיים אצל כל המכשירים המחוברים למשפחה, ולא ניתן לבטל אותה.'
+  );
+  if(!ok) return;
+  state = ensureShape(backup.state);
+  await saveState();
+  render();
+  showToast('השחזור בוצע - שאר המכשירים יתעדכנו תוך כ-20 שניות');
+}
+
 function fbUrl(base, key){
   return base + '/' + key + '.json';
 }
@@ -590,6 +629,7 @@ async function saveState(){
   try{
     saving = true;
     await kvSet(syncBucket, 'state', state);
+    saveLocalBackup();
   }catch(e){
     showToast('השמירה לא הסתנכרנה - בדקו חיבור לאינטרנט');
   }finally{
@@ -690,6 +730,7 @@ function startPolling(){
         const incomingStr = JSON.stringify(incoming);
         if(incomingStr !== JSON.stringify(state)){
           state = incoming;
+          saveLocalBackup();
           await loadAllAvatarImages(true);
           render();
         }
@@ -923,6 +964,7 @@ async function submitDbUrl(){
     if(raw){ state = ensureShape(raw); }
     else { state = defaultState(); await kvSet(url, 'state', state); isNewFamily = true; }
     saveDbUrl(url);
+    saveLocalBackup();
     await loadAllAvatarImages();
     if(isNewFamily || getChildIds().length===0){
       onboardNames = [];
@@ -1586,6 +1628,9 @@ function renderParentManage(){
     <button class="btn btn-outline btn-block" style="margin-top:10px;" onclick="copyRoomCode('${syncBucket||''}')">העתקת הכתובת</button>
     <div class="setup-hint">אם המכשיר הזה מחובר בטעות לכתובת לא נכונה (לא מסתנכרן עם השאר), אפשר לנתק אותו ולהזין כתובת מחדש - זה משפיע רק על המכשיר הזה, הנתונים עצמם לא נמחקים.</div>
     <button class="btn btn-danger btn-block" onclick="resetDeviceConnection()">ניתוק המכשיר הזה</button>`;
+    const backup = getLocalBackup();
+    html += `<div class="setup-hint">המכשיר הזה שומר אוטומטית עותק גיבוי מקומי בכל פעם שהוא מסתנכרן. ${backup?('הגיבוי האחרון נשמר ב-'+fmtBackupTime(backup.ts)+'.'):'אין עדיין גיבוי מקומי שמור במכשיר הזה.'}</div>
+    <button class="btn btn-outline btn-block" ${backup?'':'disabled'} onclick="restoreFromLocalBackup()">שחזור מגיבוי אחרון (במכשיר זה)</button>`;
   }
   html += `</div>`;
 
@@ -1796,6 +1841,7 @@ async function init(){
     const raw = await kvGet(syncBucket, 'state');
     if(raw){ state = ensureShape(raw); }
     else { state = defaultState(); await kvSet(syncBucket, 'state', state); }
+    saveLocalBackup();
     await loadAllAvatarImages();
   }catch(e){
     state = defaultState();
