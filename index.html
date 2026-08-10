@@ -498,13 +498,8 @@ function defaultState(){
     tasks: defaultTasks(),
     prizes: defaultPrizes(),
     avatars: avatarDefs(),
-    childOrder: ['ela','yahel','erez','ray'],
-    children:{
-      ela: Object.assign(newChildShell('ela','אלה','active'), {code:'1111'}),
-      yahel: Object.assign(newChildShell('yahel','יהל','active'), {code:'2222'}),
-      erez: Object.assign(newChildShell('erez','ארז','active'), {code:'3333'}),
-      ray: Object.assign(newChildShell('ray','ראי','active'), {code:'4444'}),
-    },
+    childOrder: [],
+    children: {},
     invites: {}
   };
 }
@@ -613,7 +608,6 @@ function addChildInvite(name){
   state.children[id] = newChildShell(id, name, 'invited');
   const token = genToken(8);
   state.invites[token] = { childId:id, createdAt: Date.now(), used:false };
-  saveState();
   return { id, token };
 }
 function getPendingInviteToken(childId){
@@ -866,6 +860,7 @@ function render(){
   const root = document.getElementById('app');
   if(view==='loading') root.innerHTML = renderLoading();
   else if(view==='setup') root.innerHTML = renderSetup();
+  else if(view==='onboardChildren') root.innerHTML = renderOnboardChildren();
   else if(view==='login') root.innerHTML = renderLogin();
   else if(view==='passcode') root.innerHTML = renderPasscode();
   else if(view==='acceptInvite') root.innerHTML = renderAcceptInvite();
@@ -924,11 +919,17 @@ async function submitDbUrl(){
   try{
     const raw = await kvGet(url, 'state');
     syncBucket = url;
+    let isNewFamily = false;
     if(raw){ state = ensureShape(raw); }
-    else { state = defaultState(); await kvSet(url, 'state', state); }
+    else { state = defaultState(); await kvSet(url, 'state', state); isNewFamily = true; }
     saveDbUrl(url);
     await loadAllAvatarImages();
-    view='login';
+    if(isNewFamily || getChildIds().length===0){
+      onboardNames = [];
+      view='onboardChildren';
+    } else {
+      view='login';
+    }
     render();
     startPolling();
   }catch(e){
@@ -939,15 +940,58 @@ async function submitDbUrl(){
   }
 }
 
+/* ---------- ONBOARDING: first-time family setup, add your children ---------- */
+let onboardNames = [];
+function renderOnboardChildren(){
+  const rows = onboardNames.map((n,i)=>`<div class="manage-row" style="align-items:center;">
+      <span style="flex:1 1 auto; font-weight:700;">${escapeAttr(n)}</span>
+      <button class="icon-btn" onclick="removeOnboardName(${i})">${ic('trash')}</button>
+    </div>`).join('');
+  return `<div class="center-screen">
+    <img src="${LOGIN_LOGO_URI}" alt="קווסטאר" class="login-logo">
+    <div class="passcode-title" style="color:var(--gold)">ברוכים הבאים לקווסטאר!</div>
+    <div class="setup-hint" style="margin-top:0;">בואו נכיר את המשפחה - הקלידו את שמות הילדים שישתמשו באפליקציה. אפשר להוסיף עוד ילדים בכל שלב מאוחר יותר דרך אזור ההורים.</div>
+    <div class="add-form" style="width:100%; max-width:340px;">
+      <input class="field" id="onboardChildName" placeholder="שם הילד/ה..." onkeydown="if(event.key==='Enter') addOnboardName()">
+      <button class="btn btn-outline btn-sm" onclick="addOnboardName()">${ic('plus')} הוספה</button>
+    </div>
+    ${rows ? `<div class="card" style="width:100%; max-width:340px; margin-top:10px;">${rows}</div>` : ''}
+    <button class="btn btn-gold btn-block" style="max-width:340px; margin-top:16px;" onclick="finishOnboarding()" ${onboardNames.length?'':'disabled'}>סיימתי, בואו נתחיל!</button>
+    <div class="setup-hint" style="max-width:340px;">אחרי שתלחצו "בואו נתחיל", תוכלו לשלוח לכל ילד קישור הזמנה קצר לטלפון שלו כדי שיוכל להתחבר גם הוא.</div>
+  </div>`;
+}
+function addOnboardName(){
+  const input = document.getElementById('onboardChildName');
+  const name = input ? input.value.trim() : '';
+  if(!name) return;
+  onboardNames.push(name);
+  if(input) input.value = '';
+  render();
+  setTimeout(()=>{ const el=document.getElementById('onboardChildName'); if(el) el.focus(); }, 0);
+}
+function removeOnboardName(i){
+  onboardNames.splice(i,1);
+  render();
+}
+async function finishOnboarding(){
+  onboardNames.forEach(name=>{ addChildInvite(name); });
+  onboardNames = [];
+  await saveState();
+  view='login';
+  render();
+}
+
 /* ---------- LOGIN ---------- */
 function renderLogin(){
-  const pods = getChildIds().filter(cid=>state.children[cid].status==='active').map(cid=>{
+  const activePods = getChildIds().filter(cid=>state.children[cid].status==='active');
+  const pods = activePods.map(cid=>{
     const c = state.children[cid];
     return `<div class="profile-pod ${getChildColor(cid)}" onclick="selectProfile('${cid}')">
         <div class="avatar-wrap">${avatarVisual(c.avatarEquipped)}</div>
         <div class="pname">${c.name}</div>
       </div>`;
   }).join('');
+  const noneYetHint = activePods.length===0 ? `<div class="setup-hint" style="max-width:340px;">הילדים עדיין לא הצטרפו מהמכשירים שלהם - היכנסו לאזור ההורים כדי לשלוח להם קישור הזמנה.</div>` : '';
   return `<div class="center-screen">
     <img src="${LOGIN_LOGO_URI}" alt="קווסטאר" class="login-logo">
     <div class="logo">קווסטאר</div>
@@ -955,6 +999,7 @@ function renderLogin(){
     <div class="profile-row">
       ${pods}
     </div>
+    ${noneYetHint}
     <div class="parent-pod" onclick="selectProfile('parent')">
       ${ic('shield')}
       <span>אזור הורים</span>
@@ -1668,6 +1713,7 @@ function addChildAndShare(){
   const name = input ? input.value.trim() : '';
   if(!name){ showToast('הקלידו שם'); return; }
   const created = addChildInvite(name);
+  saveState();
   if(input) input.value = '';
   render();
   if(created) shareInvite(created.id);
@@ -1755,7 +1801,12 @@ async function init(){
     state = defaultState();
     showToast('אין חיבור לרשת כרגע - מציגים נתונים מקומיים');
   }
-  view='login';
+  if(getChildIds().length===0){
+    onboardNames = [];
+    view='onboardChildren';
+  } else {
+    view='login';
+  }
   render();
   startPolling();
 }
